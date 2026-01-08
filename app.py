@@ -7,9 +7,6 @@ from src.insights import build_insight_cards
 from src.pdf_report import build_pdf_bytes
 from src.charts import interactive_dumbbell, interactive_lift_rank, interactive_confidence_scatter
 
-# ------------------------------------------------------------
-# Clean styling (simple, executive-safe)
-# ------------------------------------------------------------
 CSS = """
 <style>
 .block-container { padding-top: 2rem; padding-bottom: 2rem; max-width: 1200px; }
@@ -43,20 +40,20 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 st.set_page_config(page_title="BLS Brief", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ------------------------------------------------------------
-# Header
-# ------------------------------------------------------------
 st.markdown("## BLS Brief")
 st.markdown(
-    '<div class="small-muted">Upload the inputs. The platform computes the stats and produces a clean PDF.</div>',
+    '<div class="small-muted">Upload inputs only. The platform computes all statistical columns and exports a clean PDF.</div>',
     unsafe_allow_html=True
 )
 
-# ------------------------------------------------------------
-# Sidebar
-# ------------------------------------------------------------
 with st.sidebar:
     st.subheader("Settings")
+
+    strict_mode = st.checkbox(
+        "Strict input mode",
+        value=False,
+        help="If on: the upload is rejected when extra (computed) columns are present. If off: extra columns are ignored."
+    )
 
     include_non_sig = st.checkbox(
         "Include non-definitive results",
@@ -71,54 +68,55 @@ with st.sidebar:
 
     compare_mode = st.checkbox(
         "Comparison view",
-        value=True,
-        help="Adds interactive comparison charts and includes them in the PDF."
+        value=True
     )
 
     st.divider()
     st.subheader("PDF")
     report_title = st.text_input("Title", value="BLS Brief")
-    pdf_scope = st.radio(
-        "Export scope",
-        options=["Selected row only", "All rows in view"],
-        index=0
-    )
+    pdf_scope = st.radio("Export scope", ["Selected row only", "All rows in view"], index=0)
 
-# ------------------------------------------------------------
-# Upload
-# ------------------------------------------------------------
 uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx", "xls"])
 if uploaded is None:
     st.info("Upload a file to begin.")
     st.stop()
 
-# ------------------------------------------------------------
-# Read + validate
-# ------------------------------------------------------------
+# Read
 try:
     raw = read_uploaded_file(uploaded)
 except Exception as e:
     st.error(f"Could not read file: {e}")
     st.stop()
 
+# Validate input surface
 check = validate_input(raw)
+
 if not check["ok"]:
-    st.error("The uploaded file does not match the required structure.")
-    st.write("Missing required columns:", check["missing_base"])
-    st.write("Required inputs:")
-    st.write("- Month Year, Brand, Category, Market, KPI, Control Sample, Exposed Sample")
-    st.write("- And either (Control Score + Exposed Score) OR (Control_Prop + Exposed_Prop)")
+    st.error("Your upload is missing required input columns.")
+    st.write("Missing base columns:", check["missing_base"])
+    st.write("Missing score columns:", check["missing_scores"])
+    st.write("Allowed inputs:", check["allowed_inputs"])
     st.stop()
 
-# ------------------------------------------------------------
-# Enforce: platform calculates everything beyond inputs
-# ------------------------------------------------------------
-inputs = take_only_inputs(raw)      # drops computed columns if present
-df = compute_metrics(inputs)        # recomputes all stats
+# Extras warning or strict block
+extras = check.get("extras", [])
+if extras:
+    if strict_mode:
+        st.error("This upload contains extra (computed) columns. Strict mode is on.")
+        st.write("Remove these columns and upload again:", extras)
+        st.write("Allowed inputs:", check["allowed_inputs"])
+        st.stop()
+    else:
+        st.warning("This upload contains extra (computed) columns. They will be ignored by the platform.")
+        st.write("Ignored columns:", extras)
 
-# ------------------------------------------------------------
+# Enforce: keep only input surface (drops extra columns)
+inputs = take_only_inputs(raw)
+
+# Compute everything from inputs
+df = compute_metrics(inputs)
+
 # Filters
-# ------------------------------------------------------------
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown("### Filter")
 
@@ -142,7 +140,7 @@ if brand:
 if kpi:
     filtered = filtered[filtered["KPI"].astype(str).isin(kpi)]
 
-# Optional: remove non-definitive
+# Optional removal of non-definitive
 if allow_exclude_non_sig:
     remove_non_sig = st.checkbox("Remove non-definitive rows", value=False)
 else:
@@ -158,9 +156,7 @@ if len(filtered) == 0:
     st.warning("No rows match the current filters.")
     st.stop()
 
-# ------------------------------------------------------------
-# Summary cards
-# ------------------------------------------------------------
+# Summary
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown("### Summary")
 
@@ -179,9 +175,7 @@ with cc4:
     mode = "Non-definitive included" if include_non_sig_effective else "Non-definitive removed"
     st.markdown(f'<div class="card"><div class="card-title">Mode</div><div class="card-value">{mode}</div></div>', unsafe_allow_html=True)
 
-# ------------------------------------------------------------
 # Results table
-# ------------------------------------------------------------
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown("### Results table")
 
@@ -190,16 +184,12 @@ table_cols = [
     "Control Sample", "Exposed Sample",
     "Control_Pct", "Exposed_Pct",
     "Diff_PctPts", "Lift_Pct",
-    "P_Value", "Significant_95", "Data_Flag"
+    "Z_Score", "P_Value", "Significant_95", "Data_Flag"
 ]
 existing = [c for c in table_cols if c in filtered.columns]
-table_view = filtered[existing].reset_index(drop=True)
+st.dataframe(filtered[existing].reset_index(drop=True), use_container_width=True, height=320)
 
-st.dataframe(table_view, use_container_width=True, height=320)
-
-# ------------------------------------------------------------
-# Deep dive selector (leadership-friendly: one row at a time)
-# ------------------------------------------------------------
+# Deep dive (one row at a time)
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown("### Deep dive")
 
@@ -214,8 +204,8 @@ selected_label = st.selectbox("Choose a row", selector_df["RowLabel"].tolist(), 
 idx = selector_df.index[selector_df["RowLabel"] == selected_label][0]
 
 row = selector_df.loc[idx].to_dict()
-cards = build_insight_cards(selector_df, include_non_sig=include_non_sig_effective)
-card = cards[idx]
+cards_all = build_insight_cards(selector_df, include_non_sig=include_non_sig_effective)
+card = cards_all[idx]
 
 meta = f"{row.get('Month Year','')} • {row.get('Category','')} • {row.get('Market','')}"
 pill = card["state_label"]
@@ -241,22 +231,16 @@ with m2:
 with m3:
     st.markdown(f'<div class="card"><div class="card-title">p-value</div><div class="card-value">{row["P_Value"]:.4f}</div></div>', unsafe_allow_html=True)
 
-# Interactive row chart
 st.plotly_chart(interactive_dumbbell(row), use_container_width=True)
 
-# ------------------------------------------------------------
-# Comparison view (interactive)
-# ------------------------------------------------------------
+# Comparison (interactive)
 if compare_mode and len(filtered) > 1:
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
     st.markdown("### Comparison view")
-
     st.plotly_chart(interactive_lift_rank(filtered), use_container_width=True)
     st.plotly_chart(interactive_confidence_scatter(filtered), use_container_width=True)
 
-# ------------------------------------------------------------
-# Export PDF
-# ------------------------------------------------------------
+# Export
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown("### Export")
 
