@@ -2,26 +2,31 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Thresholds:
-    alpha: float = 0.05          # default 95%
-    min_n_warn: int = 120        # warning threshold (not exclusion)
-    min_n_low: int = 80          # stronger warning
-    effect_small: float = 0.10   # reserved for future (Cohen's h)
-    effect_medium: float = 0.30
-    effect_large: float = 0.50
+    alpha: float = 0.05          # 95%
+    min_n_warn: int = 120
+    min_n_low: int = 80
 
 DEFAULT_THRESHOLDS = Thresholds()
 
-# Required "input surface" columns.
+# Base columns people must provide
 REQUIRED_BASE_COLS = [
-    "Month Year", "Brand", "Category", "Market", "KPI",
-    "Control Sample", "Exposed Sample"
+    "Month Year",
+    "Brand",
+    "Category",
+    "Market",
+    "KPI",
+    "Control Sample",
+    "Exposed Sample",
 ]
 
-# The app accepts either:
-# A) scores as percentages (Control Score, Exposed Score), OR
-# B) proportions (Control_Prop, Exposed_Prop)
-SCORE_COLS = ["Control Score", "Exposed Score"]
-PROP_COLS = ["Control_Prop", "Exposed_Prop"]
+# We will enforce SCORES as the required input surface (not props)
+REQUIRED_SCORE_COLS = ["Control Score", "Exposed Score"]
+
+# Optional inputs (allowed, but not required)
+OPTIONAL_INPUT_COLS = ["Study ID", "KPI Order"]
+
+# Full allowed input surface = base + required scores + optional inputs
+ALLOWED_INPUT_COLS = REQUIRED_BASE_COLS + REQUIRED_SCORE_COLS + OPTIONAL_INPUT_COLS
 
 STATE_LABELS = {
     "clear_up": "Clear increase",
