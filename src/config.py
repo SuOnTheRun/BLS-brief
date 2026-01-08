@@ -2,13 +2,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Thresholds:
-    alpha: float = 0.05          # 95%
+    alpha: float = 0.05
     min_n_warn: int = 120
     min_n_low: int = 80
 
 DEFAULT_THRESHOLDS = Thresholds()
 
-# Base columns people must provide
 REQUIRED_BASE_COLS = [
     "Month Year",
     "Brand",
@@ -19,13 +18,10 @@ REQUIRED_BASE_COLS = [
     "Exposed Sample",
 ]
 
-# We will enforce SCORES as the required input surface (not props)
 REQUIRED_SCORE_COLS = ["Control Score", "Exposed Score"]
 
-# Optional inputs (allowed, but not required)
 OPTIONAL_INPUT_COLS = ["Study ID", "KPI Order"]
 
-# Full allowed input surface = base + required scores + optional inputs
 ALLOWED_INPUT_COLS = REQUIRED_BASE_COLS + REQUIRED_SCORE_COLS + OPTIONAL_INPUT_COLS
 
 STATE_LABELS = {
