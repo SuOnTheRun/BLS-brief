@@ -18,11 +18,14 @@ REQUIRED_BASE_COLS = [
     "Exposed Sample",
 ]
 
+# NEW strict input surface
 REQUIRED_SCORE_COLS = ["Control Score", "Exposed Score"]
-
 OPTIONAL_INPUT_COLS = ["Study ID", "KPI Order"]
-
 ALLOWED_INPUT_COLS = REQUIRED_BASE_COLS + REQUIRED_SCORE_COLS + OPTIONAL_INPUT_COLS
+
+# Backward compatibility (prevents import errors if any older file remains)
+SCORE_COLS = REQUIRED_SCORE_COLS
+PROP_COLS = ["Control_Prop", "Exposed_Prop"]
 
 STATE_LABELS = {
     "clear_up": "Clear increase",
