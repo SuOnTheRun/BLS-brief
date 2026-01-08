@@ -1,6 +1,6 @@
 import io
 import pandas as pd
-from .config import REQUIRED_BASE_COLS, SCORE_COLS, PROP_COLS
+from .config import REQUIRED_BASE_COLS, REQUIRED_SCORE_COLS, OPTIONAL_INPUT_COLS, ALLOWED_INPUT_COLS
 
 def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
@@ -18,43 +18,43 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def validate_input(df: pd.DataFrame) -> dict:
-    df = _normalize_columns(df)
-    cols = set(df.columns)
+    """
+    We enforce:
+      - REQUIRED_BASE_COLS
+      - REQUIRED_SCORE_COLS (Control Score, Exposed Score)
+    Optional allowed:
+      - Study ID, KPI Order
 
-    missing_base = [c for c in REQUIRED_BASE_COLS if c not in cols]
-    has_scores = all(c in cols for c in SCORE_COLS)
-    has_props = all(c in cols for c in PROP_COLS)
+    Everything else is treated as extra/computed columns.
+    """
+    df = _normalize_columns(df)
+    cols = list(df.columns)
+    colset = set(cols)
+
+    missing_base = [c for c in REQUIRED_BASE_COLS if c not in colset]
+    missing_scores = [c for c in REQUIRED_SCORE_COLS if c not in colset]
+
+    # "Extra" = anything not in allowed input surface
+    extras = [c for c in cols if c not in set(ALLOWED_INPUT_COLS)]
 
     return {
-        "ok": (len(missing_base) == 0) and (has_scores or has_props),
+        "ok": (len(missing_base) == 0 and len(missing_scores) == 0),
         "missing_base": missing_base,
-        "has_scores": has_scores,
-        "has_props": has_props,
-        "columns": list(df.columns),
+        "missing_scores": missing_scores,
+        "extras": extras,
+        "columns": cols,
+        "allowed_inputs": ALLOWED_INPUT_COLS
     }
 
 def take_only_inputs(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Enforces your rule: users provide only the input surface (up to Column I).
-    Everything else is computed by the platform.
-
-    We keep only:
-      - REQUIRED_BASE_COLS
-      - Either SCORE_COLS OR PROP_COLS (whichever is present)
-    We drop any additional columns even if they exist in the upload.
+    Drops all extra columns, keeping only the allowed input surface.
+    This guarantees "Column I onwards" stats are always calculated by the platform.
     """
     df = _normalize_columns(df)
 
-    cols = set(df.columns)
-    keep = list(REQUIRED_BASE_COLS)
+    keep = [c for c in ALLOWED_INPUT_COLS if c in df.columns]
+    out = df.loc[:, keep].copy()
 
-    if all(c in cols for c in PROP_COLS):
-        keep += PROP_COLS
-    elif all(c in cols for c in SCORE_COLS):
-        keep += SCORE_COLS
-    else:
-        # validate_input should already have caught this
-        pass
-
-    out = df.loc[:, [c for c in keep if c in df.columns]].copy()
+    # Ensure optional inputs exist (if missing, just ignore — not required)
     return out
