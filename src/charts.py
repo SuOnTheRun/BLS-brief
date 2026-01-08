@@ -1,7 +1,11 @@
 import io
 import numpy as np
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def fig_to_png_bytes(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=180)
@@ -9,7 +13,10 @@ def fig_to_png_bytes(fig):
     buf.seek(0)
     return buf.getvalue()
 
-def chart_control_vs_exposed(row):
+# =============================
+# Matplotlib charts (for PDF)
+# =============================
+def chart_control_vs_exposed_matplotlib(row):
     control = float(row["Control_Pct"])
     exposed = float(row["Exposed_Pct"])
     kpi = str(row["KPI"])
@@ -32,8 +39,8 @@ def chart_control_vs_exposed(row):
     ax.grid(True, axis="y", alpha=0.2)
     return fig
 
-def chart_lift_rank(df, title="Lift by KPI"):
-    fig = plt.figure(figsize=(7.0, max(2.6, 0.35*len(df) + 1.8)))
+def chart_lift_rank_matplotlib(df, title="Lift by row (ranked)"):
+    fig = plt.figure(figsize=(7.0, max(2.6, 0.35 * len(df) + 1.8)))
     ax = fig.add_subplot(111)
 
     df2 = df.copy().sort_values("Lift_Pct", ascending=True)
@@ -43,7 +50,7 @@ def chart_lift_rank(df, title="Lift by KPI"):
     ax.grid(True, axis="x", alpha=0.2)
     return fig
 
-def chart_confidence_quadrant(df, title="Lift vs confidence"):
+def chart_confidence_quadrant_matplotlib(df, title="Lift vs confidence"):
     fig = plt.figure(figsize=(6.6, 4.0))
     ax = fig.add_subplot(111)
 
@@ -57,4 +64,89 @@ def chart_confidence_quadrant(df, title="Lift vs confidence"):
     ax.set_ylabel("-log10(p-value)")
     ax.set_title(title)
     ax.grid(True, alpha=0.15)
+    return fig
+
+# =============================
+# Plotly charts (interactive UI)
+# =============================
+def interactive_dumbbell(row):
+    brand = str(row.get("Brand", ""))
+    kpi = str(row.get("KPI", ""))
+    control = float(row["Control_Pct"])
+    exposed = float(row["Exposed_Pct"])
+    diff = float(row["Diff_PctPts"])
+    pval = float(row["P_Value"])
+    sig = bool(row["Significant_95"])
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=[control, exposed],
+        y=["Score", "Score"],
+        mode="markers+lines",
+        hovertemplate=(
+            "Group: %{text}<br>"
+            "Score: %{x:.2f}%<extra></extra>"
+        ),
+        text=["Control", "Exposed"]
+    ))
+
+    fig.update_layout(
+        title=f"{brand} — {kpi}",
+        xaxis_title="Score (%)",
+        yaxis=dict(showticklabels=False),
+        margin=dict(l=20, r=20, t=50, b=20),
+        height=240
+    )
+
+    fig.add_annotation(
+        x=exposed, y=1, xref="x", yref="paper",
+        text=f"Diff: {diff:.2f} pts • p={pval:.4f} • {'clear' if sig else 'directional'}",
+        showarrow=False, yanchor="bottom"
+    )
+
+    return fig
+
+def interactive_lift_rank(df):
+    tmp = df.copy()
+    tmp["Label"] = tmp["Brand"].astype(str) + " • " + tmp["KPI"].astype(str)
+    tmp = tmp.sort_values("Lift_Pct", ascending=True)
+
+    fig = go.Figure(go.Bar(
+        x=tmp["Lift_Pct"],
+        y=tmp["Label"],
+        orientation="h",
+        hovertemplate="Lift: %{x:.2f}%<br>%{y}<extra></extra>"
+    ))
+
+    fig.update_layout(
+        title="Lift by row (ranked)",
+        xaxis_title="Relative lift (%)",
+        margin=dict(l=20, r=20, t=50, b=20),
+        height=max(320, 28 * len(tmp) + 120)
+    )
+    return fig
+
+def interactive_confidence_scatter(df):
+    tmp = df.copy()
+    tmp["Label"] = tmp["Brand"].astype(str) + " • " + tmp["KPI"].astype(str)
+    tmp["Conf"] = -np.log10(np.clip(tmp["P_Value"].astype(float), 1e-12, 1.0))
+
+    fig = go.Figure(go.Scatter(
+        x=tmp["Lift_Pct"].astype(float),
+        y=tmp["Conf"],
+        mode="markers",
+        text=tmp["Label"],
+        hovertemplate="%{text}<br>Lift: %{x:.2f}%<br>-log10(p): %{y:.2f}<extra></extra>"
+    ))
+
+    fig.add_vline(x=0, line_width=1)
+
+    fig.update_layout(
+        title="Lift vs confidence",
+        xaxis_title="Relative lift (%)",
+        yaxis_title="-log10(p-value)",
+        margin=dict(l=20, r=20, t=50, b=20),
+        height=380
+    )
     return fig
