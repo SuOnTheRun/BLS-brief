@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
 # -----------------------------
-# Helpers
+# Helpers for PDF (matplotlib)
 # -----------------------------
 def fig_to_png_bytes(fig):
     buf = io.BytesIO()
@@ -14,7 +14,7 @@ def fig_to_png_bytes(fig):
     return buf.getvalue()
 
 # =============================
-# Matplotlib charts (for PDF)
+# Matplotlib charts (PDF)
 # =============================
 def chart_control_vs_exposed_matplotlib(row):
     control = float(row["Control_Pct"])
@@ -79,16 +79,12 @@ def interactive_dumbbell(row):
     sig = bool(row["Significant_95"])
 
     fig = go.Figure()
-
     fig.add_trace(go.Scatter(
         x=[control, exposed],
         y=["Score", "Score"],
         mode="markers+lines",
-        hovertemplate=(
-            "Group: %{text}<br>"
-            "Score: %{x:.2f}%<extra></extra>"
-        ),
-        text=["Control", "Exposed"]
+        text=["Control", "Exposed"],
+        hovertemplate="Group: %{text}<br>Score: %{x:.2f}%<extra></extra>"
     ))
 
     fig.update_layout(
@@ -96,15 +92,14 @@ def interactive_dumbbell(row):
         xaxis_title="Score (%)",
         yaxis=dict(showticklabels=False),
         margin=dict(l=20, r=20, t=50, b=20),
-        height=240
+        height=260
     )
 
     fig.add_annotation(
         x=exposed, y=1, xref="x", yref="paper",
-        text=f"Diff: {diff:.2f} pts • p={pval:.4f} • {'clear' if sig else 'directional'}",
+        text=f"Gap: {diff:.2f} pts • p={pval:.4f} • {'clear' if sig else 'directional'}",
         showarrow=False, yanchor="bottom"
     )
-
     return fig
 
 def interactive_lift_rank(df):
@@ -123,7 +118,7 @@ def interactive_lift_rank(df):
         title="Lift by row (ranked)",
         xaxis_title="Relative lift (%)",
         margin=dict(l=20, r=20, t=50, b=20),
-        height=max(320, 28 * len(tmp) + 120)
+        height=max(360, 28 * len(tmp) + 140)
     )
     return fig
 
@@ -147,6 +142,56 @@ def interactive_confidence_scatter(df):
         xaxis_title="Relative lift (%)",
         yaxis_title="-log10(p-value)",
         margin=dict(l=20, r=20, t=50, b=20),
-        height=380
+        height=420
+    )
+    return fig
+
+def interactive_lift_histogram(df):
+    x = df["Lift_Pct"].astype(float)
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=x,
+        nbinsx=18,
+        hovertemplate="Lift bin count: %{y}<extra></extra>"
+    ))
+    fig.add_vline(x=0, line_width=1)
+    fig.update_layout(
+        title="Lift distribution",
+        xaxis_title="Lift (%)",
+        yaxis_title="Count of rows",
+        margin=dict(l=20, r=20, t=50, b=20),
+        height=320
+    )
+    return fig
+
+def interactive_ci_interval(row):
+    brand = str(row.get("Brand", ""))
+    kpi = str(row.get("KPI", ""))
+
+    diff = float(row["Diff_PctPts"])
+    lo = float(row.get("CI_Low_PctPts", np.nan))
+    hi = float(row.get("CI_High_PctPts", np.nan))
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[lo, hi],
+        y=["Difference", "Difference"],
+        mode="lines",
+        hovertemplate="CI: %{x:.2f} pts<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=[diff],
+        y=["Difference"],
+        mode="markers",
+        hovertemplate="Diff: %{x:.2f} pts<extra></extra>"
+    ))
+    fig.add_vline(x=0, line_width=1)
+
+    fig.update_layout(
+        title=f"Difference range (CI) — {brand} • {kpi}",
+        xaxis_title="Difference (percentage points)",
+        yaxis=dict(showticklabels=False),
+        margin=dict(l=20, r=20, t=50, b=20),
+        height=240
     )
     return fig
