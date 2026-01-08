@@ -19,13 +19,12 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def validate_input(df: pd.DataFrame) -> dict:
     """
-    We enforce:
+    Enforces:
       - REQUIRED_BASE_COLS
       - REQUIRED_SCORE_COLS (Control Score, Exposed Score)
-    Optional allowed:
+    Allowed optional:
       - Study ID, KPI Order
-
-    Everything else is treated as extra/computed columns.
+    Everything else is "extra / computed".
     """
     df = _normalize_columns(df)
     cols = list(df.columns)
@@ -34,7 +33,6 @@ def validate_input(df: pd.DataFrame) -> dict:
     missing_base = [c for c in REQUIRED_BASE_COLS if c not in colset]
     missing_scores = [c for c in REQUIRED_SCORE_COLS if c not in colset]
 
-    # "Extra" = anything not in allowed input surface
     extras = [c for c in cols if c not in set(ALLOWED_INPUT_COLS)]
 
     return {
@@ -48,13 +46,8 @@ def validate_input(df: pd.DataFrame) -> dict:
 
 def take_only_inputs(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Drops all extra columns, keeping only the allowed input surface.
-    This guarantees "Column I onwards" stats are always calculated by the platform.
+    Keeps only the allowed input surface, drops everything else.
     """
     df = _normalize_columns(df)
-
     keep = [c for c in ALLOWED_INPUT_COLS if c in df.columns]
-    out = df.loc[:, keep].copy()
-
-    # Ensure optional inputs exist (if missing, just ignore — not required)
-    return out
+    return df.loc[:, keep].copy()
