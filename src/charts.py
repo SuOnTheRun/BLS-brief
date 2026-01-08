@@ -13,7 +13,7 @@ def chart_control_vs_exposed(row):
     control = float(row["Control_Pct"])
     exposed = float(row["Exposed_Pct"])
     kpi = str(row["KPI"])
-    brand = str(row["Brand_Alias"])
+    brand = str(row.get("Brand", ""))
 
     fig = plt.figure(figsize=(6.2, 2.6))
     ax = fig.add_subplot(111)
