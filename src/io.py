@@ -33,12 +33,28 @@ def validate_input(df: pd.DataFrame) -> dict:
         "columns": list(df.columns),
     }
 
-def make_brand_alias_map(brands) -> dict:
-    brands = [b for b in brands if str(b).strip() != "" and pd.notna(b)]
-    unique = sorted(set(map(str, brands)))
-    return {b: f"Brand {chr(65+i)}" for i, b in enumerate(unique)}
+def take_only_inputs(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enforces your rule: users provide only the input surface (up to Column I).
+    Everything else is computed by the platform.
 
-def apply_aliases(df: pd.DataFrame, alias_map: dict) -> pd.DataFrame:
-    out = df.copy()
-    out["Brand_Alias"] = out["Brand"].astype(str).map(alias_map).fillna("Brand ?")
+    We keep only:
+      - REQUIRED_BASE_COLS
+      - Either SCORE_COLS OR PROP_COLS (whichever is present)
+    We drop any additional columns even if they exist in the upload.
+    """
+    df = _normalize_columns(df)
+
+    cols = set(df.columns)
+    keep = list(REQUIRED_BASE_COLS)
+
+    if all(c in cols for c in PROP_COLS):
+        keep += PROP_COLS
+    elif all(c in cols for c in SCORE_COLS):
+        keep += SCORE_COLS
+    else:
+        # validate_input should already have caught this
+        pass
+
+    out = df.loc[:, [c for c in keep if c in df.columns]].copy()
     return out
