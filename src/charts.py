@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
 # =============================
-# Helpers
+# Helpers (used by PDF)
 # =============================
 def fig_to_png_bytes(fig):
     buf = io.BytesIO()
@@ -14,22 +14,72 @@ def fig_to_png_bytes(fig):
     return buf.getvalue()
 
 def _conf_score(pvals):
-    # Certainty for visuals; higher = stronger
     p = np.clip(np.array(pvals, dtype=float), 1e-12, 1.0)
     return -np.log10(p)
 
-# =============================
-# INTERACTIVE EXECUTIVE VISUALS
-# =============================
+# ============================================================
+# Matplotlib charts (PDF) — KEEP THESE NAMES FOR pdf_report.py
+# ============================================================
+def chart_control_vs_exposed_matplotlib(row):
+    control = float(row["Control_Pct"])
+    exposed = float(row["Exposed_Pct"])
+    kpi = str(row.get("KPI", ""))
+    brand = str(row.get("Brand", ""))
 
+    fig = plt.figure(figsize=(6.2, 2.6))
+    ax = fig.add_subplot(111)
+
+    ax.scatter([0, 1], [control, exposed])
+    ax.plot([0, 1], [control, exposed])
+
+    ax.set_xticks([0, 1], ["Control", "Exposed"])
+    ax.set_ylabel("Score (%)")
+    ax.set_title(f"{brand} — {kpi}")
+
+    ax.text(0, control, f" {control:.2f}%", va="bottom")
+    ax.text(1, exposed, f" {exposed:.2f}%", va="bottom")
+
+    lo = min(control, exposed) - 5
+    hi = max(control, exposed) + 5
+    ax.set_ylim(lo, hi)
+    ax.grid(True, axis="y", alpha=0.2)
+    return fig
+
+def chart_lift_rank_matplotlib(df, title="Lift by row (ranked)"):
+    fig = plt.figure(figsize=(7.0, max(2.6, 0.35 * len(df) + 1.8)))
+    ax = fig.add_subplot(111)
+
+    df2 = df.copy()
+    if "Label" not in df2.columns:
+        df2["Label"] = df2["Brand"].astype(str) + " • " + df2["KPI"].astype(str)
+
+    df2 = df2.sort_values("Lift_Pct", ascending=True)
+    ax.barh(df2["Label"], df2["Lift_Pct"])
+    ax.set_xlabel("Relative lift (%)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", alpha=0.2)
+    return fig
+
+def chart_confidence_quadrant_matplotlib(df, title="Lift vs confidence"):
+    fig = plt.figure(figsize=(6.6, 4.0))
+    ax = fig.add_subplot(111)
+
+    x = df["Lift_Pct"].astype(float)
+    p = df["P_Value"].astype(float)
+    y = -np.log10(np.clip(p, 1e-12, 1.0))
+
+    ax.scatter(x, y)
+    ax.axvline(0, alpha=0.2)
+    ax.set_xlabel("Relative lift (%)")
+    ax.set_ylabel("-log10(p-value)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.15)
+    return fig
+
+# ==================================
+# Executive Plotly visuals (UI)
+# ==================================
 def executive_impact_matrix(df):
-    """
-    Lift (%) vs certainty with quadrants:
-    - Top-right: Act
-    - Bottom-right: Watch
-    - Top-left: Investigate (strong but negative)
-    - Bottom-left: Ignore
-    """
     tmp = df.copy()
     tmp["Label"] = tmp["Brand"].astype(str) + " • " + tmp["KPI"].astype(str)
     tmp["Certainty"] = _conf_score(tmp["P_Value"])
@@ -37,13 +87,10 @@ def executive_impact_matrix(df):
     x = tmp["Lift_Pct"].astype(float)
     y = tmp["Certainty"].astype(float)
 
-    # thresholds
-    # p<0.05 => -log10(p) ~ 1.30
-    y_thr = 1.301
+    y_thr = 1.301  # p<0.05
     x_thr = 0.0
 
     fig = go.Figure()
-
     fig.add_trace(go.Scatter(
         x=x, y=y,
         mode="markers",
@@ -58,11 +105,9 @@ def executive_impact_matrix(df):
         )
     ))
 
-    # quadrant lines
     fig.add_hline(y=y_thr, line_width=1, opacity=0.25)
     fig.add_vline(x=x_thr, line_width=1, opacity=0.25)
 
-    # quadrant labels
     fig.add_annotation(x=0.75, y=0.97, xref="paper", yref="paper", text="Act", showarrow=False)
     fig.add_annotation(x=0.75, y=0.08, xref="paper", yref="paper", text="Watch", showarrow=False)
     fig.add_annotation(x=0.10, y=0.97, xref="paper", yref="paper", text="Investigate", showarrow=False)
@@ -77,15 +122,9 @@ def executive_impact_matrix(df):
     )
     return fig
 
-
 def executive_forest_plot(df, top_n=25):
-    """
-    Forest plot: effect (diff in pts) with CI. This is the most trusted exec visual.
-    """
     tmp = df.copy()
     tmp["Label"] = tmp["Brand"].astype(str) + " • " + tmp["KPI"].astype(str) + " • " + tmp["Month Year"].astype(str)
-
-    # pick top absolute movers so the plot stays readable
     tmp["AbsDiff"] = tmp["Diff_PctPts"].abs()
     tmp = tmp.sort_values("AbsDiff", ascending=False).head(top_n)
     tmp = tmp.sort_values("Diff_PctPts", ascending=True)
@@ -97,8 +136,7 @@ def executive_forest_plot(df, top_n=25):
 
     fig = go.Figure()
 
-    # CI lines
-    for i, (yy, l, h) in enumerate(zip(y, lo, hi)):
+    for yy, l, h in zip(y, lo, hi):
         fig.add_trace(go.Scatter(
             x=[l, h], y=[yy, yy],
             mode="lines",
@@ -107,7 +145,6 @@ def executive_forest_plot(df, top_n=25):
             opacity=0.6
         ))
 
-    # point estimates
     fig.add_trace(go.Scatter(
         x=diff, y=y,
         mode="markers",
@@ -129,14 +166,9 @@ def executive_forest_plot(df, top_n=25):
         margin=dict(l=20, r=20, t=55, b=20),
         height=max(520, 22 * len(tmp) + 220)
     )
-
     return fig
 
-
 def executive_reliability_ribbon(df):
-    """
-    Simple count ribbon by Reliability label.
-    """
     tmp = df.copy()
     order = ["High", "Medium", "Directional", "Low"]
     counts = {k: int((tmp["Reliability"] == k).sum()) for k in order}
@@ -146,6 +178,7 @@ def executive_reliability_ribbon(df):
         y=[counts[k] for k in order],
         hovertemplate="%{x}: %{y}<extra></extra>"
     ))
+
     fig.update_layout(
         title="Reliability mix (how much you can trust the view)",
         xaxis_title="Reliability",
@@ -155,13 +188,10 @@ def executive_reliability_ribbon(df):
     )
     return fig
 
-
 def executive_story_card_chart(row):
-    """
-    A single KPI story: control vs exposed + CI band on the difference.
-    """
     brand = str(row.get("Brand", ""))
     kpi = str(row.get("KPI", ""))
+
     control = float(row["Control_Pct"])
     exposed = float(row["Exposed_Pct"])
     diff = float(row["Diff_PctPts"])
@@ -171,7 +201,6 @@ def executive_story_card_chart(row):
     rel = str(row.get("Reliability", ""))
 
     fig = go.Figure()
-
     fig.add_trace(go.Bar(
         x=["Control", "Exposed"],
         y=[control, exposed],
@@ -194,26 +223,20 @@ def executive_story_card_chart(row):
     )
     return fig
 
-
-# -----------------------------
-# Backward-compatible names (so your app imports won't break)
-# -----------------------------
+# ======================================================
+# Names used by app.py (interactive) — keep stable
+# ======================================================
 def interactive_dumbbell(row):
-    # keep old call working; use the executive story chart instead
     return executive_story_card_chart(row)
 
 def interactive_lift_rank(df):
-    # keep old call working; map to forest plot
     return executive_forest_plot(df, top_n=min(25, len(df)))
 
 def interactive_confidence_scatter(df):
-    # keep old call working; map to impact matrix
     return executive_impact_matrix(df)
 
 def interactive_lift_histogram(df):
-    # replace with reliability ribbon (more useful than histogram)
     return executive_reliability_ribbon(df)
 
 def interactive_ci_interval(row):
-    # keep old call working; use story card chart
     return executive_story_card_chart(row)
