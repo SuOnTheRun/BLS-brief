@@ -259,6 +259,22 @@ if compare_mode and len(filtered) > 1:
     st.plotly_chart(interactive_lift_rank(filtered), use_container_width=True)
     st.plotly_chart(interactive_confidence_scatter(filtered), use_container_width=True)
 
+st.markdown("### What moved most (quick scan)")
+
+tmp = filtered.copy()
+tmp["Label"] = tmp["Brand"].astype(str) + " • " + tmp["KPI"].astype(str)
+
+top_pos = tmp.sort_values("Diff_PctPts", ascending=False).head(6)
+top_neg = tmp.sort_values("Diff_PctPts", ascending=True).head(6)
+
+cA, cB = st.columns(2)
+with cA:
+    st.markdown("**Top increases**")
+    st.dataframe(top_pos[["Label","Diff_PctPts","Lift_Pct","P_Value","Reliability"]], use_container_width=True, height=240)
+with cB:
+    st.markdown("**Top declines**")
+    st.dataframe(top_neg[["Label","Diff_PctPts","Lift_Pct","P_Value","Reliability"]], use_container_width=True, height=240)
+
 # -----------------------------
 # Results table (includes computed metrics)
 # -----------------------------
