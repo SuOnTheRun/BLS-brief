@@ -3,6 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
+# =============================
+# Helpers
+# =============================
 def fig_to_png_bytes(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=180)
@@ -15,9 +18,6 @@ def _conf_score(pvals):
     return -np.log10(p)
 
 def _quadrant(lift, certainty, y_thr=1.301):
-    """
-    lift: x axis, certainty: y axis
-    """
     if lift >= 0 and certainty >= y_thr:
         return "Act"
     if lift >= 0 and certainty < y_thr:
@@ -33,8 +33,76 @@ QUAD_COLORS = {
     "Ignore": "rgba(148, 163, 184, 0.9)"     # grey
 }
 
+# ============================================================
+# MATPLOTLIB CHARTS (used by src/pdf_report.py for PDF export)
+# ============================================================
+def chart_control_vs_exposed_matplotlib(row):
+    """
+    A simple but clean "control vs exposed" chart for PDFs.
+    Expects row to contain Control_Pct and Exposed_Pct (in % scale, e.g., 47.1).
+    """
+    control = float(row["Control_Pct"])
+    exposed = float(row["Exposed_Pct"])
+    kpi = str(row.get("KPI", ""))
+    brand = str(row.get("Brand", ""))
+
+    fig = plt.figure(figsize=(6.0, 2.8))
+    ax = fig.add_subplot(111)
+
+    ax.bar(["Control", "Exposed"], [control, exposed])
+    ax.set_ylabel("Score (%)")
+    ax.set_title(f"{brand} — {kpi}")
+
+    ax.text(0, control, f"{control:.2f}%", ha="center", va="bottom", fontsize=9)
+    ax.text(1, exposed, f"{exposed:.2f}%", ha="center", va="bottom", fontsize=9)
+
+    lo = min(control, exposed) - 5
+    hi = max(control, exposed) + 5
+    ax.set_ylim(lo, hi)
+    ax.grid(True, axis="y", alpha=0.2)
+    return fig
+
+def chart_lift_rank_matplotlib(df, title="Lift by row (ranked)"):
+    """
+    PDF chart: ranked lift bars (horizontal).
+    Requires df columns: Lift_Pct, Brand, KPI (optional Label).
+    """
+    d = df.copy()
+    if "Label" not in d.columns:
+        d["Label"] = d["Brand"].astype(str) + " • " + d["KPI"].astype(str)
+
+    d = d.sort_values("Lift_Pct", ascending=True)
+
+    fig = plt.figure(figsize=(7.0, max(2.8, 0.35 * len(d) + 1.8)))
+    ax = fig.add_subplot(111)
+    ax.barh(d["Label"], d["Lift_Pct"].astype(float))
+    ax.set_xlabel("Relative lift (%)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", alpha=0.2)
+    return fig
+
+def chart_confidence_quadrant_matplotlib(df, title="Lift vs confidence"):
+    """
+    PDF chart: scatter of lift vs certainty.
+    Requires columns: Lift_Pct, P_Value
+    """
+    d = df.copy()
+    x = d["Lift_Pct"].astype(float)
+    y = _conf_score(d["P_Value"].astype(float))
+
+    fig = plt.figure(figsize=(6.6, 4.2))
+    ax = fig.add_subplot(111)
+    ax.scatter(x, y)
+    ax.axvline(0, alpha=0.2)
+    ax.axhline(1.301, alpha=0.2)
+    ax.set_xlabel("Relative lift (%)")
+    ax.set_ylabel("-log10(p-value)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.15)
+    return fig
+
 # =============================
-# Executive visuals
+# INTERACTIVE EXECUTIVE VISUALS
 # =============================
 def executive_reliability_ribbon(df):
     order = ["High", "Medium", "Directional", "Low"]
@@ -66,8 +134,6 @@ def executive_impact_matrix(df):
     ]
 
     fig = go.Figure()
-
-    # one trace per quadrant => different color dots + legend
     for q in ["Act", "Watch", "Investigate", "Ignore"]:
         d = tmp[tmp["Quadrant"] == q]
         if len(d) == 0:
@@ -123,7 +189,6 @@ def executive_forest_plot(df, top_n=25):
 
     fig = go.Figure()
 
-    # CI lines
     for yy, l, h in zip(y, lo, hi):
         fig.add_trace(go.Scatter(
             x=[l, h], y=[yy, yy],
@@ -133,7 +198,6 @@ def executive_forest_plot(df, top_n=25):
             opacity=0.6
         ))
 
-    # points
     fig.add_trace(go.Scatter(
         x=diff, y=y,
         mode="markers",
@@ -189,7 +253,7 @@ def executive_story_card_chart(row):
     return fig
 
 # -----------------------------
-# Backward-compatible function names (app.py uses these)
+# Backward-compatible names (app.py uses these)
 # -----------------------------
 def interactive_lift_histogram(df):
     return executive_reliability_ribbon(df)
