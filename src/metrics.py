@@ -1,144 +1,134 @@
-import numpy as np
+import math
 import pandas as pd
-from scipy.stats import norm
-from .config import DEFAULT_THRESHOLDS
 
-def _to_prop_from_score(x):
+def _norm_cdf(z: float) -> float:
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+def _two_sided_p_value(z: float) -> float:
+    z = abs(float(z))
+    return max(0.0, min(1.0, 2.0 * (1.0 - _norm_cdf(z))))
+
+def _clamp01(x: float) -> float:
+    if x != x:
+        return float("nan")
+    return max(0.0, min(1.0, x))
+
+def _to_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return float("nan")
+
+def compute_all_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Accepts:
-      - "47.10%" -> 0.471
-      - 47.10    -> 0.471 (assumed percent if > 1.5)
-      - 0.471    -> 0.471
+    Computes the full BLS stats from inputs only.
+
+    Required input columns:
+      - Control Sample
+      - Exposed Sample
+      - Control Score
+      - Exposed Score
+
+    Scores can be 0–100 (percent) or 0–1 (proportion).
     """
-    if pd.isna(x):
-        return np.nan
-    if isinstance(x, str):
-        s = x.strip().replace(",", "")
-        if s.endswith("%"):
-            s = s[:-1]
-        try:
-            v = float(s)
-        except:
-            return np.nan
+    d = df.copy()
+
+    required = ["Control Sample", "Exposed Sample", "Control Score", "Exposed Score"]
+    missing = [c for c in required if c not in d.columns]
+    if missing:
+        raise ValueError(f"Missing required input columns: {missing}")
+
+    n1 = d["Control Sample"].apply(_to_float).astype(float)
+    n2 = d["Exposed Sample"].apply(_to_float).astype(float)
+
+    s1 = d["Control Score"].apply(_to_float).astype(float)
+    s2 = d["Exposed Score"].apply(_to_float).astype(float)
+
+    med = pd.concat([s1, s2], axis=0).median(skipna=True)
+    scores_are_percent = (med is not None) and (med == med) and (med > 1.5)
+
+    if scores_are_percent:
+        p1 = (s1 / 100.0).apply(_clamp01)
+        p2 = (s2 / 100.0).apply(_clamp01)
     else:
+        p1 = s1.apply(_clamp01)
+        p2 = s2.apply(_clamp01)
+
+    diff = (p2 - p1)
+    lift = diff / p1.replace(0.0, float("nan"))
+
+    pooled = ((p1 * n1) + (p2 * n2)) / (n1 + n2)
+
+    se = (pooled * (1 - pooled) * (1 / n1 + 1 / n2))
+    se = se.apply(lambda x: math.sqrt(x) if (x == x and x >= 0) else float("nan"))
+
+    z = diff / se.replace(0.0, float("nan"))
+    pval = z.apply(lambda zz: _two_sided_p_value(zz) if (zz == zz) else float("nan"))
+
+    zcrit = 1.96
+    ci_low = diff - zcrit * se
+    ci_high = diff + zcrit * se
+
+    sig95 = pval.apply(lambda pv: bool(pv <= 0.05) if (pv == pv) else False)
+
+    def cohens_h(a, b):
         try:
-            v = float(x)
-        except:
-            return np.nan
+            return 2.0 * math.asin(math.sqrt(_clamp01(b))) - 2.0 * math.asin(math.sqrt(_clamp01(a)))
+        except Exception:
+            return float("nan")
 
-    if v > 1.5:
-        return v / 100.0
-    return v
+    h = [cohens_h(a, b) for a, b in zip(p1.tolist(), p2.tolist())]
 
-def _effect_size_h(p1, p2):
-    # Cohen's h for proportions
-    p1 = np.clip(p1, 1e-12, 1 - 1e-12)
-    p2 = np.clip(p2, 1e-12, 1 - 1e-12)
-    return 2 * np.arcsin(np.sqrt(p2)) - 2 * np.arcsin(np.sqrt(p1))
+    def h_qual(val):
+        try:
+            av = abs(float(val))
+            if av < 0.2:
+                return "Small"
+            if av < 0.5:
+                return "Medium"
+            return "Large"
+        except Exception:
+            return "Unknown"
 
-def _effect_size_qual(h):
-    ah = np.abs(h)
-    if np.isnan(ah):
-        return ""
-    if ah < 0.2:
-        return "Small"
-    if ah < 0.5:
-        return "Medium"
-    return "Large"
+    hq = [h_qual(x) for x in h]
 
-def _reliability(significant, n1, n2, data_flag, effect_qual):
-    """
-    Plain, practical confidence label:
-    - High: clear + healthy samples
-    - Medium: clear but limited sample
-    - Directional: not clear, but enough sample to treat as a signal (not a conclusion)
-    - Low: too small or too noisy
-    """
-    if significant and data_flag == "":
-        return "High"
-    if significant and data_flag in ["Limited sample", "Low sample"]:
-        return "Medium"
-    if (not significant) and data_flag == "" and effect_qual in ["Medium", "Large"]:
-        return "Directional"
-    if data_flag == "Low sample":
+    def reliability(nc, ne, pv):
+        try:
+            nc = float(nc); ne = float(ne); pv = float(pv)
+        except Exception:
+            return "Low"
+
+        min_n = min(nc, ne)
+
+        if pv <= 0.05 and min_n >= 300:
+            return "High"
+        if pv <= 0.05 and min_n >= 150:
+            return "Medium"
+        if pv <= 0.10 and min_n >= 150:
+            return "Directional"
+        if min_n >= 150 and pv > 0.10:
+            return "Directional"
         return "Low"
-    return "Directional" if not significant else "Medium"
 
-def compute_metrics(df: pd.DataFrame, alpha: float = DEFAULT_THRESHOLDS.alpha) -> pd.DataFrame:
-    out = df.copy()
+    rel = [reliability(a, b, c) for a, b, c in zip(n1.tolist(), n2.tolist(), pval.tolist())]
 
-    out["Control Sample"] = pd.to_numeric(out["Control Sample"], errors="coerce")
-    out["Exposed Sample"] = pd.to_numeric(out["Exposed Sample"], errors="coerce")
+    d["Control_Pct"] = (p1 * 100.0)
+    d["Exposed_Pct"] = (p2 * 100.0)
 
-    out["Control_Prop"] = out["Control Score"].apply(_to_prop_from_score)
-    out["Exposed_Prop"] = out["Exposed Score"].apply(_to_prop_from_score)
+    d["Diff_PctPts"] = (diff * 100.0)
+    d["Lift_Pct"] = (lift * 100.0)
 
-    p1 = out["Control_Prop"].astype(float)
-    p2 = out["Exposed_Prop"].astype(float)
-    n1 = out["Control Sample"].astype(float)
-    n2 = out["Exposed Sample"].astype(float)
+    d["Pooled_Prop"] = pooled
+    d["Std_Error"] = se
+    d["Z_Score"] = z
+    d["P_Value"] = pval
 
-    # Basics
-    out["Diff_Prop"] = p2 - p1
-    out["Lift_Rel"] = np.where(p1 == 0, np.nan, (p2 - p1) / p1)
+    d["CI_Low_PctPts"] = (ci_low * 100.0)
+    d["CI_High_PctPts"] = (ci_high * 100.0)
 
-    out["Control_Pct"] = p1 * 100
-    out["Exposed_Pct"] = p2 * 100
-    out["Diff_PctPts"] = out["Diff_Prop"] * 100
-    out["Lift_Pct"] = out["Lift_Rel"] * 100
+    d["Significant_95"] = sig95
+    d["Effect_Size_h"] = h
+    d["Effect_Size_Qual"] = hq
+    d["Reliability"] = rel
 
-    # Compatibility with your sheet naming
-    out["Uplift_Average"] = out["Lift_Pct"]
-    out["Uplift_Median"] = np.nan  # cannot compute without individual-level data
-
-    # Totals
-    out["Total_Sample"] = n1 + n2
-
-    # Two-proportion z-test (sheet-style)
-    pooled = (p1 * n1 + p2 * n2) / (n1 + n2)
-    out["Pooled_Prop"] = pooled
-
-    std_error = np.sqrt(pooled * (1 - pooled) * (1 / n1 + 1 / n2))
-    out["Std_Error"] = std_error
-
-    z = (p2 - p1) / std_error
-    out["Z_Score"] = z
-
-    pval = 2 * (1 - norm.cdf(np.abs(z)))
-    out["P_Value"] = pval
-    out["Significant_95"] = out["P_Value"] < alpha
-
-    # SE of the difference (unpooled)
-    se_diff = np.sqrt((p1 * (1 - p1)) / n1 + (p2 * (1 - p2)) / n2)
-    out["SE_Diff"] = se_diff
-
-    zcrit = norm.ppf(1 - alpha / 2)
-    ci_low = (p2 - p1) - zcrit * se_diff
-    ci_high = (p2 - p1) + zcrit * se_diff
-
-    out["CI_Diff_Low"] = ci_low
-    out["CI_Diff_High"] = ci_high
-    out["CI_Low_PctPts"] = ci_low * 100
-    out["CI_High_PctPts"] = ci_high * 100
-
-    # Effect size
-    h = _effect_size_h(p1, p2)
-    out["Effect_Size_h"] = h
-    out["Effect_Size_Qual"] = [ _effect_size_qual(v) for v in h ]
-
-    # Data flags (simple)
-    out["Data_Flag"] = ""
-    out.loc[(n1 < DEFAULT_THRESHOLDS.min_n_low) | (n2 < DEFAULT_THRESHOLDS.min_n_low), "Data_Flag"] = "Low sample"
-    out.loc[
-        ((n1 >= DEFAULT_THRESHOLDS.min_n_low) & (n1 < DEFAULT_THRESHOLDS.min_n_warn)) |
-        ((n2 >= DEFAULT_THRESHOLDS.min_n_low) & (n2 < DEFAULT_THRESHOLDS.min_n_warn)),
-        "Data_Flag"
-    ] = out["Data_Flag"].replace("", "Limited sample")
-
-    # Reliability
-    out["Reliability"] = [
-        _reliability(bool(sig), float(a), float(b), str(flag), str(eq))
-        for sig, a, b, flag, eq in zip(out["Significant_95"], n1, n2, out["Data_Flag"], out["Effect_Size_Qual"])
-    ]
-
-    return out
+    return d
