@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from src.io import read_uploaded_file, validate_input, take_only_inputs
-from src.compute import compute_all_metrics
+from src.metrics import compute_all_metrics
 from src.charts import (
     executive_reliability_ribbon,
     executive_impact_matrix,
