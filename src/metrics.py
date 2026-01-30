@@ -1,17 +1,25 @@
 import math
 import pandas as pd
 
+
+# -------------------------
+# Helpers
+# -------------------------
+
 def _norm_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
 
 def _two_sided_p_value(z: float) -> float:
     z = abs(float(z))
     return max(0.0, min(1.0, 2.0 * (1.0 - _norm_cdf(z))))
 
+
 def _clamp01(x: float) -> float:
     if x != x:
         return float("nan")
     return max(0.0, min(1.0, x))
+
 
 def _to_float(x):
     try:
@@ -19,65 +27,111 @@ def _to_float(x):
     except Exception:
         return float("nan")
 
+
+# -------------------------
+# Core computation
+# -------------------------
+
 def compute_all_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Computes the full BLS stats from inputs only.
+    Computes raw statistical outputs for BLS from inputs only.
 
-    Required input columns:
-      - Control Sample
-      - Exposed Sample
-      - Control Score
-      - Exposed Score
+    REQUIRED INPUT COLUMNS
+    ----------------------
+    - Control Sample
+    - Exposed Sample
+    - Control Score
+    - Exposed Score
 
-    Scores can be 0–100 (percent) or 0–1 (proportion).
+    Score format:
+    - Either 0–100 (percent) OR 0–1 (proportion)
+    - Auto-detected
+
+    OUTPUT PHILOSOPHY
+    -----------------
+    This function:
+    - Computes maths only
+    - Does NOT assign reliability bands
+    - Does NOT label clarity
+    - Does NOT decide what is shown/hidden
+    All interpretation happens downstream in rules.py
     """
+
     d = df.copy()
 
-    required = ["Control Sample", "Exposed Sample", "Control Score", "Exposed Score"]
+    required = [
+        "Control Sample",
+        "Exposed Sample",
+        "Control Score",
+        "Exposed Score"
+    ]
     missing = [c for c in required if c not in d.columns]
     if missing:
         raise ValueError(f"Missing required input columns: {missing}")
 
-    n1 = d["Control Sample"].apply(_to_float).astype(float)
-    n2 = d["Exposed Sample"].apply(_to_float).astype(float)
+    # -------------------------
+    # Samples
+    # -------------------------
 
-    s1 = d["Control Score"].apply(_to_float).astype(float)
-    s2 = d["Exposed Score"].apply(_to_float).astype(float)
+    n_control = d["Control Sample"].apply(_to_float).astype(float)
+    n_exposed = d["Exposed Sample"].apply(_to_float).astype(float)
 
-    med = pd.concat([s1, s2], axis=0).median(skipna=True)
+    # -------------------------
+    # Scores
+    # -------------------------
+
+    s_control = d["Control Score"].apply(_to_float).astype(float)
+    s_exposed = d["Exposed Score"].apply(_to_float).astype(float)
+
+    # Detect score scale
+    med = pd.concat([s_control, s_exposed], axis=0).median(skipna=True)
     scores_are_percent = (med is not None) and (med == med) and (med > 1.5)
 
     if scores_are_percent:
-        p1 = (s1 / 100.0).apply(_clamp01)
-        p2 = (s2 / 100.0).apply(_clamp01)
+        p_control = (s_control / 100.0).apply(_clamp01)
+        p_exposed = (s_exposed / 100.0).apply(_clamp01)
     else:
-        p1 = s1.apply(_clamp01)
-        p2 = s2.apply(_clamp01)
+        p_control = s_control.apply(_clamp01)
+        p_exposed = s_exposed.apply(_clamp01)
 
-    diff = (p2 - p1)
-    lift = diff / p1.replace(0.0, float("nan"))
+    # -------------------------
+    # Core effects
+    # -------------------------
 
-    pooled = ((p1 * n1) + (p2 * n2)) / (n1 + n2)
+    diff_prop = p_exposed - p_control
+    lift_prop = diff_prop / p_control.replace(0.0, float("nan"))
 
-    se = (pooled * (1 - pooled) * (1 / n1 + 1 / n2))
+    # -------------------------
+    # Two-proportion z-test
+    # -------------------------
+
+    pooled = ((p_control * n_control) + (p_exposed * n_exposed)) / (n_control + n_exposed)
+
+    se = pooled * (1 - pooled) * (1 / n_control + 1 / n_exposed)
     se = se.apply(lambda x: math.sqrt(x) if (x == x and x >= 0) else float("nan"))
 
-    z = diff / se.replace(0.0, float("nan"))
-    pval = z.apply(lambda zz: _two_sided_p_value(zz) if (zz == zz) else float("nan"))
+    z = diff_prop / se.replace(0.0, float("nan"))
+    p_value = z.apply(lambda zz: _two_sided_p_value(zz) if (zz == zz) else float("nan"))
 
+    # 95% confidence interval for the gap
     zcrit = 1.96
-    ci_low = diff - zcrit * se
-    ci_high = diff + zcrit * se
+    ci_low = diff_prop - zcrit * se
+    ci_high = diff_prop + zcrit * se
 
-    sig95 = pval.apply(lambda pv: bool(pv <= 0.05) if (pv == pv) else False)
+    # -------------------------
+    # Effect size (Cohen’s h)
+    # -------------------------
 
     def cohens_h(a, b):
         try:
-            return 2.0 * math.asin(math.sqrt(_clamp01(b))) - 2.0 * math.asin(math.sqrt(_clamp01(a)))
+            return (
+                2.0 * math.asin(math.sqrt(_clamp01(b)))
+                - 2.0 * math.asin(math.sqrt(_clamp01(a)))
+            )
         except Exception:
             return float("nan")
 
-    h = [cohens_h(a, b) for a, b in zip(p1.tolist(), p2.tolist())]
+    h_vals = [cohens_h(a, b) for a, b in zip(p_control.tolist(), p_exposed.tolist())]
 
     def h_qual(val):
         try:
@@ -90,45 +144,37 @@ def compute_all_metrics(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             return "Unknown"
 
-    hq = [h_qual(x) for x in h]
+    h_qual_vals = [h_qual(x) for x in h_vals]
 
-    def reliability(nc, ne, pv):
-        try:
-            nc = float(nc); ne = float(ne); pv = float(pv)
-        except Exception:
-            return "Low"
+    # -------------------------
+    # Attach outputs (RAW ONLY)
+    # -------------------------
 
-        min_n = min(nc, ne)
+    d["Control Sample"] = n_control
+    d["Exposed Sample"] = n_exposed
 
-        if pv <= 0.05 and min_n >= 300:
-            return "High"
-        if pv <= 0.05 and min_n >= 150:
-            return "Medium"
-        if pv <= 0.10 and min_n >= 150:
-            return "Directional"
-        if min_n >= 150 and pv > 0.10:
-            return "Directional"
-        return "Low"
+    d["Control_Pct"] = p_control * 100.0
+    d["Exposed_Pct"] = p_exposed * 100.0
 
-    rel = [reliability(a, b, c) for a, b, c in zip(n1.tolist(), n2.tolist(), pval.tolist())]
-
-    d["Control_Pct"] = (p1 * 100.0)
-    d["Exposed_Pct"] = (p2 * 100.0)
-
-    d["Diff_PctPts"] = (diff * 100.0)
-    d["Lift_Pct"] = (lift * 100.0)
+    d["Diff_PctPts"] = diff_prop * 100.0
+    d["Lift_Pct"] = lift_prop * 100.0
 
     d["Pooled_Prop"] = pooled
     d["Std_Error"] = se
     d["Z_Score"] = z
-    d["P_Value"] = pval
+    d["P_Value"] = p_value
 
-    d["CI_Low_PctPts"] = (ci_low * 100.0)
-    d["CI_High_PctPts"] = (ci_high * 100.0)
+    d["CI_Low_PctPts"] = ci_low * 100.0
+    d["CI_High_PctPts"] = ci_high * 100.0
 
-    d["Significant_95"] = sig95
-    d["Effect_Size_h"] = h
-    d["Effect_Size_Qual"] = hq
-    d["Reliability"] = rel
+    d["Effect_Size_h"] = h_vals
+    d["Effect_Size_Qual"] = h_qual_vals
+
+    # IMPORTANT:
+    # No reliability band
+    # No clarity label
+    # No hiding logic
+    # No notes
+    # Those belong in rules.py
 
     return d
