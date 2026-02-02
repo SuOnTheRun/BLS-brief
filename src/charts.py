@@ -1,7 +1,31 @@
 import io
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+
+
+# =============================
+# DataFrame guard (CRITICAL FIX)
+# =============================
+def _ensure_df(x, context="charts"):
+    """
+    Prevents the common crash:
+    AttributeError: 'numpy.ndarray' object has no attribute 'loc'
+    by ensuring we always operate on a pandas DataFrame.
+    """
+    if isinstance(x, pd.DataFrame):
+        return x
+    try:
+        return pd.DataFrame(x)
+    except Exception:
+        raise ValueError(f"{context}: expected a pandas DataFrame (or convertible), got {type(x)}")
+
+
+def _require_cols(df, cols, context="charts"):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"{context}: missing required columns: {missing}")
 
 
 # =============================
@@ -18,11 +42,9 @@ def fig_to_png_bytes(fig):
 # =============================
 # Core helpers
 # =============================
-
 def _safe_float(x, default=np.nan):
     try:
-        v = float(x)
-        return v
+        return float(x)
     except Exception:
         return default
 
@@ -48,7 +70,6 @@ def _fallback_reliability_band(df, great=300, good=100, directional=50):
             df["Exposed Sample"].astype(float).to_numpy(),
         )
     else:
-        # If samples missing, treat as unknown -> Low
         n = np.full(len(df), np.nan)
 
     out = []
@@ -69,11 +90,10 @@ def _fallback_reliability_band(df, great=300, good=100, directional=50):
 def _fallback_clarity_band(df, clear_p=0.05, directional_p=0.10, good_threshold=100):
     """
     Fallback clarity band if Clarity_Band doesn't exist.
-    Uses p-value + reliability_n gate (min sample >= good_threshold) for Clear.
+    Uses p-value + reliability_n gate for Clear.
     """
     p = df["P_Value"].astype(float).to_numpy() if "P_Value" in df.columns else np.full(len(df), np.nan)
 
-    # reliability_n gate
     if "Control Sample" in df.columns and "Exposed Sample" in df.columns:
         min_n = np.minimum(
             df["Control Sample"].astype(float).to_numpy(),
@@ -101,7 +121,6 @@ def _ensure_bands(df):
     Ensures the dataframe has:
       - Reliability_Band  (Great/Good/Directional/Low)
       - Clarity_Band      (Clear/Directional/Unclear)
-
     If not present, creates fallbacks.
     """
     d = df.copy()
@@ -118,8 +137,8 @@ def _ensure_bands(df):
 def _quadrant_from_effect(diff_pp, certainty, y_thr=1.301, x_thr=0.0):
     """
     Quadrants for Impact Matrix.
-    - x axis is effect size (Diff_PctPts by default): right positive, left negative
-    - y axis is certainty: higher stronger
+    x axis: Diff_PctPts (effect in percentage points)
+    y axis: certainty = -log10(p)
     """
     if diff_pp >= x_thr and certainty >= y_thr:
         return "Act"
@@ -131,10 +150,10 @@ def _quadrant_from_effect(diff_pp, certainty, y_thr=1.301, x_thr=0.0):
 
 
 QUAD_COLORS = {
-    "Act": "rgba(22, 163, 74, 0.90)",          # green
-    "Watch": "rgba(234, 179, 8, 0.90)",        # amber
-    "Investigate": "rgba(239, 68, 68, 0.90)",  # red
-    "Ignore": "rgba(148, 163, 184, 0.90)"      # grey
+    "Act": "rgba(22, 163, 74, 0.90)",
+    "Watch": "rgba(234, 179, 8, 0.90)",
+    "Investigate": "rgba(239, 68, 68, 0.90)",
+    "Ignore": "rgba(148, 163, 184, 0.90)"
 }
 
 BAND_ORDER = ["Great", "Good", "Directional", "Low"]
@@ -144,12 +163,7 @@ CLARITY_ORDER = ["Clear", "Directional", "Unclear"]
 # ============================================================
 # MATPLOTLIB CHARTS (used by src/pdf_report.py for PDF export)
 # ============================================================
-
 def chart_control_vs_exposed_matplotlib(row):
-    """
-    PDF chart: control vs exposed bars.
-    Expects row to contain Control_Pct and Exposed_Pct.
-    """
     control = _safe_float(row.get("Control_Pct", np.nan))
     exposed = _safe_float(row.get("Exposed_Pct", np.nan))
     kpi = str(row.get("KPI", ""))
@@ -162,8 +176,10 @@ def chart_control_vs_exposed_matplotlib(row):
     ax.set_ylabel("Score (%)")
     ax.set_title(f"{brand} — {kpi}")
 
-    ax.text(0, control, f"{control:.1f}%", ha="center", va="bottom", fontsize=9)
-    ax.text(1, exposed, f"{exposed:.1f}%", ha="center", va="bottom", fontsize=9)
+    if control == control:
+        ax.text(0, control, f"{control:.1f}%", ha="center", va="bottom", fontsize=9)
+    if exposed == exposed:
+        ax.text(1, exposed, f"{exposed:.1f}%", ha="center", va="bottom", fontsize=9)
 
     lo = min(control, exposed) - 5
     hi = max(control, exposed) + 5
@@ -175,18 +191,15 @@ def chart_control_vs_exposed_matplotlib(row):
 
 
 def chart_lift_rank_matplotlib(df, title="Lift by row (ranked)"):
-    """
-    PDF chart: ranked lift bars (horizontal).
-    Requires Lift_Pct, Brand, KPI.
-    """
-    d = df.copy()
+    d = _ensure_df(df, context="chart_lift_rank_matplotlib").copy()
 
     if "Label" not in d.columns:
-        d["Label"] = d.get("Brand", "").astype(str) + " • " + d.get("KPI", "").astype(str)
+        brand = d["Brand"].astype(str) if "Brand" in d.columns else ""
+        kpi = d["KPI"].astype(str) if "KPI" in d.columns else ""
+        d["Label"] = brand + " • " + kpi
 
     if "Lift_Pct" not in d.columns:
-        # If lift isn't present, fall back to Diff_PctPts
-        d["Lift_Pct"] = d.get("Diff_PctPts", 0.0)
+        d["Lift_Pct"] = d["Diff_PctPts"] if "Diff_PctPts" in d.columns else 0.0
 
     d = d.sort_values("Lift_Pct", ascending=True)
 
@@ -201,13 +214,15 @@ def chart_lift_rank_matplotlib(df, title="Lift by row (ranked)"):
 
 
 def chart_confidence_quadrant_matplotlib(df, title="Effect vs certainty"):
-    """
-    PDF chart: scatter of effect vs certainty.
-    Uses Diff_PctPts (preferred) and p-values.
-    """
-    d = df.copy()
+    d = _ensure_df(df, context="chart_confidence_quadrant_matplotlib").copy()
 
-    x = d["Diff_PctPts"].astype(float) if "Diff_PctPts" in d.columns else d["Lift_Pct"].astype(float)
+    if "Diff_PctPts" in d.columns:
+        x = d["Diff_PctPts"].astype(float)
+        xlab = "Effect (percentage points) — exposed minus control"
+    else:
+        x = d["Lift_Pct"].astype(float) if "Lift_Pct" in d.columns else np.zeros(len(d))
+        xlab = "Lift (%)"
+
     y = _conf_score_from_p(d["P_Value"].astype(float)) if "P_Value" in d.columns else np.zeros(len(d))
 
     fig = plt.figure(figsize=(6.6, 4.2))
@@ -217,24 +232,18 @@ def chart_confidence_quadrant_matplotlib(df, title="Effect vs certainty"):
     ax.axvline(0, alpha=0.2)
     ax.axhline(1.301, alpha=0.2)
 
-    ax.set_xlabel("Effect (percentage points) — exposed minus control")
+    ax.set_xlabel(xlab)
     ax.set_ylabel("Certainty (−log10 p)")
     ax.set_title(title)
     ax.grid(True, alpha=0.15)
-
     return fig
 
 
 # =============================
 # INTERACTIVE EXECUTIVE VISUALS
 # =============================
-
 def executive_reliability_ribbon(df):
-    """
-    Interactive bar: reliability mix.
-    Uses Reliability_Band if present, else fallback.
-    """
-    d = _ensure_bands(df)
+    d = _ensure_bands(_ensure_df(df, context="executive_reliability_ribbon"))
 
     counts = {k: int((d["Reliability_Band"] == k).sum()) for k in BAND_ORDER}
 
@@ -255,10 +264,8 @@ def executive_reliability_ribbon(df):
 
 
 def executive_clarity_mix(df):
-    """
-    Interactive bar: clarity mix (Clear / Directional / Unclear).
-    """
-    d = _ensure_bands(df)
+    d = _ensure_bands(_ensure_df(df, context="executive_clarity_mix"))
+
     counts = {k: int((d["Clarity_Band"] == k).sum()) for k in CLARITY_ORDER}
 
     fig = go.Figure(go.Bar(
@@ -278,25 +285,30 @@ def executive_clarity_mix(df):
 
 
 def executive_impact_matrix(df):
-    """
-    Interactive scatter: impact matrix.
-    Best practice here is to use Diff_PctPts on x-axis (clearer than Lift when baseline is small).
-    y-axis is certainty = -log10(p).
-    Dots are colored by quadrant.
-    """
-    d = _ensure_bands(df).copy()
+    d = _ensure_bands(_ensure_df(df, context="executive_impact_matrix")).copy()
+
+    # Require minimum columns for the matrix. If missing, fail cleanly.
+    if "Diff_PctPts" not in d.columns and "Lift_Pct" not in d.columns:
+        raise ValueError("executive_impact_matrix: need Diff_PctPts or Lift_Pct.")
+    if "P_Value" not in d.columns:
+        raise ValueError("executive_impact_matrix: need P_Value.")
 
     # Labels
     brand = d["Brand"].astype(str) if "Brand" in d.columns else ""
     kpi = d["KPI"].astype(str) if "KPI" in d.columns else ""
     month = d["Month Year"].astype(str) if "Month Year" in d.columns else ""
-    d["Label"] = np.where(month != "", brand + " • " + kpi + " • " + month, brand + " • " + kpi)
 
-    # Axes
+    d["Label"] = np.where(
+        month != "",
+        brand + " • " + kpi + " • " + month,
+        brand + " • " + kpi
+    )
+
+    # Axes (prefer Diff_PctPts)
     x = d["Diff_PctPts"].astype(float) if "Diff_PctPts" in d.columns else d["Lift_Pct"].astype(float)
-    y = _conf_score_from_p(d["P_Value"].astype(float)) if "P_Value" in d.columns else np.zeros(len(d))
+    y = _conf_score_from_p(d["P_Value"].astype(float))
 
-    y_thr = 1.301  # ~ p=0.05
+    y_thr = 1.301
     d["Certainty"] = y
 
     d["Quadrant"] = [
@@ -314,7 +326,6 @@ def executive_impact_matrix(df):
     lift_pct = col_or_nan("Lift_Pct")
     p_val = col_or_nan("P_Value")
 
-    # Reliability + clarity for hover
     rel = d["Reliability_Band"].astype(str)
     cla = d["Clarity_Band"].astype(str)
 
@@ -341,7 +352,7 @@ def executive_impact_matrix(df):
                 lift_pct.loc[idx],
                 p_val.loc[idx],
                 rel.loc[idx],
-                cla.loc[idx]
+                cla.loc[idx],
             ], axis=1),
             hovertemplate=(
                 "%{text}<br>"
@@ -367,20 +378,20 @@ def executive_impact_matrix(df):
 
 
 def executive_forest_plot(df, top_n=25):
-    """
-    Interactive effect-size view with confidence intervals.
-    Uses Diff_PctPts + CI bands.
-    """
-    d = _ensure_bands(df).copy()
+    d = _ensure_bands(_ensure_df(df, context="executive_forest_plot")).copy()
 
-    # Build label
+    # Labels
     brand = d["Brand"].astype(str) if "Brand" in d.columns else ""
     kpi = d["KPI"].astype(str) if "KPI" in d.columns else ""
     month = d["Month Year"].astype(str) if "Month Year" in d.columns else ""
     d["Label"] = np.where(month != "", brand + " • " + kpi + " • " + month, brand + " • " + kpi)
 
     if "Diff_PctPts" not in d.columns:
-        d["Diff_PctPts"] = d.get("Exposed_Pct", 0.0) - d.get("Control_Pct", 0.0)
+        # fallback: exposed - control if available
+        if "Exposed_Pct" in d.columns and "Control_Pct" in d.columns:
+            d["Diff_PctPts"] = d["Exposed_Pct"].astype(float) - d["Control_Pct"].astype(float)
+        else:
+            d["Diff_PctPts"] = 0.0
 
     d["AbsDiff"] = d["Diff_PctPts"].astype(float).abs()
     d = d.sort_values("AbsDiff", ascending=False).head(int(min(top_n, len(d))))
@@ -393,13 +404,11 @@ def executive_forest_plot(df, top_n=25):
         lo = d["CI_Low_PctPts"].astype(float).tolist()
         hi = d["CI_High_PctPts"].astype(float).tolist()
     else:
-        # Fallback if CI missing
         lo = [np.nan for _ in diff]
         hi = [np.nan for _ in diff]
 
     fig = go.Figure()
 
-    # CI lines
     for yy, l, h in zip(y, lo, hi):
         if (l == l) and (h == h):
             fig.add_trace(go.Scatter(
@@ -410,7 +419,6 @@ def executive_forest_plot(df, top_n=25):
                 opacity=0.6
             ))
 
-    # Point markers
     fig.add_trace(go.Scatter(
         x=diff,
         y=y,
@@ -434,10 +442,6 @@ def executive_forest_plot(df, top_n=25):
 
 
 def executive_story_card_chart(row):
-    """
-    Interactive story card for a single KPI row.
-    Assumes row contains Control_Pct, Exposed_Pct, Diff_PctPts, P_Value (optional CI).
-    """
     brand = str(row.get("Brand", ""))
     kpi = str(row.get("KPI", ""))
 
@@ -494,16 +498,15 @@ def executive_story_card_chart(row):
 # -----------------------------
 # Backward-compatible names (app.py may use these)
 # -----------------------------
-
 def interactive_lift_histogram(df):
-    # Historically used for "overview" – now points to reliability mix
     return executive_reliability_ribbon(df)
 
 def interactive_confidence_scatter(df):
     return executive_impact_matrix(df)
 
 def interactive_lift_rank(df):
-    return executive_forest_plot(df, top_n=min(25, len(df)))
+    d = _ensure_df(df, context="interactive_lift_rank")
+    return executive_forest_plot(d, top_n=min(25, len(d)))
 
 def interactive_dumbbell(row):
     return executive_story_card_chart(row)
