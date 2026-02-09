@@ -2,9 +2,32 @@ import math
 import pandas as pd
 
 
-# =========================
-# Math helpers
-# =========================
+# -----------------------
+# parsing + math helpers
+# -----------------------
+def _to_float(x):
+    try:
+        if x is None:
+            return float("nan")
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip()
+        if s == "" or s.lower() in ("nan", "none", "null", "-"):
+            return float("nan")
+        s = s.replace(",", "")
+        if s.endswith("%"):
+            s = s[:-1].strip()
+        return float(s)
+    except Exception:
+        return float("nan")
+
+
+def _clamp01(x: float) -> float:
+    if x != x:
+        return float("nan")
+    return max(0.0, min(1.0, x))
+
+
 def _norm_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
@@ -14,36 +37,9 @@ def _two_sided_p_value(z: float) -> float:
     return max(0.0, min(1.0, 2.0 * (1.0 - _norm_cdf(z))))
 
 
-def _clamp01(x: float) -> float:
-    if x != x:
-        return float("nan")
-    return max(0.0, min(1.0, x))
-
-
-def _to_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return float("nan")
-
-
-# =========================
-# Notes dictionary (keys only here; copy lives in UI layer too)
-# =========================
-NOTE_KEYS = {
-    "LOW_RELIABILITY",
-    "DIRECTIONAL_SIGNAL",
-    "UNCLEAR_SIGNAL",
-    "LIFT_HIDDEN_SMALL_BASE",
-    "FLAT_RESULT",
-    "NEGATIVE_RESULT",
-    "AGGREGATED_RESULT",
-    "MIXED_PERFORMANCE",
-    "DATA_MISSING",
-    "FILTER_IMPACT",
-}
-
-
+# -----------------------
+# main compute
+# -----------------------
 def compute_all_metrics(
     df: pd.DataFrame,
     *,
@@ -51,29 +47,36 @@ def compute_all_metrics(
     GREAT_THRESHOLD: int = 300,
     GOOD_THRESHOLD: int = 100,
     DIRECTIONAL_THRESHOLD: int = 50,
-    # Clarity thresholds
+    # Clarity thresholds (p-value)
     CLEAR_P_THRESHOLD: float = 0.05,
     DIRECTIONAL_P_THRESHOLD: float = 0.10,
-    # Lift visibility rules
-    MIN_BASELINE_PERCENT: float = 5.0,  # control % < 5 => hide lift
-    MIN_LIFT_SAMPLE: int = 50,          # control_n < 50 => hide lift
-    # Flat result rule (gap smaller than this)
+    # Lift visibility
+    MIN_BASELINE_PERCENT: float = 5.0,
+    MIN_LIFT_SAMPLE: int = 50,
+    # Flat threshold
     FLAT_THRESHOLD_PP: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Computes BLS stats from inputs only, plus:
-      - Reliability_N, Reliability_Band (Great/Good/Directional/Low)
-      - Clarity_Band (Clear/Directional/Unclear)
-      - Lift_Shown boolean
-      - Notes_Keys (pipe-separated), Notes_Count
-
-    Required input columns:
+    INPUT columns required (from your template):
       - Control Sample
       - Exposed Sample
       - Control Score
       - Exposed Score
 
-    Scores can be 0–100 (percent) or 0–1 (proportion).
+    Control/Exposed Score can be:
+      - 0–100 (percent)
+      - 0–1 (proportion)
+      - "38%" string
+
+    OUTPUT adds:
+      Control_Pct, Exposed_Pct
+      Diff_PctPts (gap)
+      Lift_Pct
+      P_Value, CI_Low_PctPts, CI_High_PctPts, Significant_95
+      Reliability_N, Reliability_Band (Great/Good/Directional/Low)
+      Clarity_Band (Clear/Directional/Unclear)
+      Lift_Shown
+      Notes_Keys (pipe-separated)
     """
     d = df.copy()
 
@@ -88,9 +91,10 @@ def compute_all_metrics(
     s1 = d["Control Score"].apply(_to_float).astype(float)
     s2 = d["Exposed Score"].apply(_to_float).astype(float)
 
-    # detect whether scores are 0-100 vs 0-1
+    # Decide if scores are % or proportions:
+    # If median > 1.5 we treat as percent scale.
     med = pd.concat([s1, s2], axis=0).median(skipna=True)
-    scores_are_percent = (med is not None) and (med == med) and (med > 1.5)
+    scores_are_percent = (med == med) and (med > 1.5)
 
     if scores_are_percent:
         p1 = (s1 / 100.0).apply(_clamp01)
@@ -99,51 +103,33 @@ def compute_all_metrics(
         p1 = s1.apply(_clamp01)
         p2 = s2.apply(_clamp01)
 
-    diff = (p2 - p1)  # proportion points (0-1)
+    # Gap + Lift (in proportions first)
+    diff = (p2 - p1)  # 0..1
     lift = diff / p1.replace(0.0, float("nan"))
 
+    # Two-proportion z test (pooled)
     pooled = ((p1 * n1) + (p2 * n2)) / (n1 + n2)
-
-    se = (pooled * (1 - pooled) * (1 / n1 + 1 / n2))
+    se = pooled * (1 - pooled) * (1 / n1 + 1 / n2)
     se = se.apply(lambda x: math.sqrt(x) if (x == x and x >= 0) else float("nan"))
 
     z = diff / se.replace(0.0, float("nan"))
     pval = z.apply(lambda zz: _two_sided_p_value(zz) if (zz == zz) else float("nan"))
 
+    # 95% CI for diff
     zcrit = 1.96
     ci_low = diff - zcrit * se
     ci_high = diff + zcrit * se
 
-    sig95 = pval.apply(lambda pv: bool(pv <= CLEAR_P_THRESHOLD) if (pv == pv) else False)
+    # Derived display columns
+    control_pct = p1 * 100.0
+    exposed_pct = p2 * 100.0
+    diff_pp = diff * 100.0
+    lift_pct = lift * 100.0
 
-    # effect size (Cohen's h)
-    def cohens_h(a, b):
-        try:
-            return 2.0 * math.asin(math.sqrt(_clamp01(b))) - 2.0 * math.asin(math.sqrt(_clamp01(a)))
-        except Exception:
-            return float("nan")
-
-    h = [cohens_h(a, b) for a, b in zip(p1.tolist(), p2.tolist())]
-
-    def h_qual(val):
-        try:
-            av = abs(float(val))
-            if av < 0.2:
-                return "Small"
-            if av < 0.5:
-                return "Medium"
-            return "Large"
-        except Exception:
-            return "Unknown"
-
-    hq = [h_qual(x) for x in h]
-
-    # -------------------------
-    # Reliability + Clarity bands (A)
-    # -------------------------
+    # Reliability
     reliability_n = pd.concat([n1, n2], axis=1).min(axis=1)
 
-    def reliability_band(mn):
+    def _reliability_band(mn):
         try:
             mn = float(mn)
         except Exception:
@@ -158,9 +144,10 @@ def compute_all_metrics(
             return "Directional"
         return "Low"
 
-    rel_band = reliability_n.apply(reliability_band)
+    rel_band = reliability_n.apply(_reliability_band)
 
-    def clarity_band(pv, mn):
+    # Clarity (gated by "Good" sample for Clear)
+    def _clarity_band(pv, mn):
         try:
             pv = float(pv)
             mn = float(mn)
@@ -168,24 +155,18 @@ def compute_all_metrics(
             return "Unclear"
         if pv != pv:
             return "Unclear"
-        # Gate Clear by "Good" minimum sample
         if pv <= CLEAR_P_THRESHOLD and (mn == mn and mn >= GOOD_THRESHOLD):
             return "Clear"
         if pv <= DIRECTIONAL_P_THRESHOLD:
             return "Directional"
         return "Unclear"
 
-    clarity = [clarity_band(pv, mn) for pv, mn in zip(pval.tolist(), reliability_n.tolist())]
+    clarity_band = [
+        _clarity_band(pv, mn) for pv, mn in zip(pval.tolist(), reliability_n.tolist())
+    ]
 
-    # -------------------------
-    # Lift visibility rule (A)
-    # -------------------------
-    control_pct = (p1 * 100.0)
-    exposed_pct = (p2 * 100.0)
-    diff_pp = (diff * 100.0)
-    lift_pct = (lift * 100.0)
-
-    def lift_shown_row(cpct, cn):
+    # Lift shown rule
+    def _lift_shown(cpct, cn):
         try:
             cpct = float(cpct)
             cn = float(cn)
@@ -199,27 +180,24 @@ def compute_all_metrics(
             return False
         return True
 
-    lift_shown = [lift_shown_row(cp, cn) for cp, cn in zip(control_pct.tolist(), n1.tolist())]
+    lift_shown = [
+        _lift_shown(cp, cn) for cp, cn in zip(control_pct.tolist(), n1.tolist())
+    ]
 
-    # -------------------------
-    # Notes engine (keys)
-    # -------------------------
-    def notes_for_row(gap_pp_val, rb, cb, lift_ok):
+    # Notes keys
+    def _notes(gappp, rb, cb, lift_ok):
         notes = []
-        # reliability
         if rb == "Low":
             notes.append("LOW_RELIABILITY")
-        # clarity
         if cb == "Unclear":
             notes.append("UNCLEAR_SIGNAL")
         elif cb == "Directional":
             notes.append("DIRECTIONAL_SIGNAL")
-        # lift hidden
         if not lift_ok:
             notes.append("LIFT_HIDDEN_SMALL_BASE")
-        # direction / flatness
+
         try:
-            g = float(gap_pp_val)
+            g = float(gappp)
             if g == g:
                 if abs(g) < float(FLAT_THRESHOLD_PP):
                     notes.append("FLAT_RESULT")
@@ -228,50 +206,38 @@ def compute_all_metrics(
         except Exception:
             pass
 
-        # de-dup preserve order
+        # stable ordering, de-dup
         seen = set()
         out = []
         for k in notes:
-            if k in NOTE_KEYS and k not in seen:
+            if k not in seen:
                 seen.add(k)
                 out.append(k)
         return out
 
-    notes_list = [
-        notes_for_row(g, rb, cb, lk)
-        for g, rb, cb, lk in zip(diff_pp.tolist(), rel_band.tolist(), clarity, lift_shown)
+    notes_keys = [
+        "|".join(_notes(g, rb, cb, lk))
+        for g, rb, cb, lk in zip(diff_pp.tolist(), rel_band.tolist(), clarity_band, lift_shown)
     ]
-    notes_keys = ["|".join(x) if x else "" for x in notes_list]
-    notes_count = [len(x) for x in notes_list]
 
-    # -------------------------
+    # Significant_95
+    sig95 = [bool(pv <= CLEAR_P_THRESHOLD) if (pv == pv) else False for pv in pval.tolist()]
+
     # Write columns
-    # -------------------------
     d["Control_Pct"] = control_pct
     d["Exposed_Pct"] = exposed_pct
     d["Diff_PctPts"] = diff_pp
     d["Lift_Pct"] = lift_pct
 
-    d["Pooled_Prop"] = pooled
-    d["Std_Error"] = se
-    d["Z_Score"] = z
     d["P_Value"] = pval
-
-    d["CI_Low_PctPts"] = (ci_low * 100.0)
-    d["CI_High_PctPts"] = (ci_high * 100.0)
-
+    d["CI_Low_PctPts"] = ci_low * 100.0
+    d["CI_High_PctPts"] = ci_high * 100.0
     d["Significant_95"] = sig95
-    d["Effect_Size_h"] = h
-    d["Effect_Size_Qual"] = hq
 
-    # A-system fields
     d["Reliability_N"] = reliability_n
     d["Reliability_Band"] = rel_band
-    d["Clarity_Band"] = clarity
+    d["Clarity_Band"] = clarity_band
     d["Lift_Shown"] = lift_shown
-
-    # Notes (keys)
     d["Notes_Keys"] = notes_keys
-    d["Notes_Count"] = notes_count
 
     return d
