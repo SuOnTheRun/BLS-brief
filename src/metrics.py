@@ -2,9 +2,9 @@ import math
 import pandas as pd
 
 
-# =============================
-# Small math helpers
-# =============================
+# =========================
+# Math helpers
+# =========================
 def _norm_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
@@ -15,7 +15,7 @@ def _two_sided_p_value(z: float) -> float:
 
 
 def _clamp01(x: float) -> float:
-    if x != x:  # NaN
+    if x != x:
         return float("nan")
     return max(0.0, min(1.0, x))
 
@@ -27,29 +27,27 @@ def _to_float(x):
         return float("nan")
 
 
-def _is_nan(x) -> bool:
-    return not (x == x)
-
-
-# =============================
-# Notes dictionary (human-first)
-# =============================
-NOTES = {
-    "LOW_RELIABILITY": "Only a small number of people answered this question. With small samples, results can swing easily—treat this as a hint, not a conclusion.",
-    "DIRECTIONAL_SIGNAL": "This result points in a direction, but we don’t yet have enough evidence to be fully confident. Treat this as an early signal that would benefit from more data.",
-    "UNCLEAR_SIGNAL": "We can’t reliably tell whether this difference is real or just random variation. This does not mean nothing happened—only that evidence is not strong yet.",
-    "LIFT_HIDDEN_SMALL_BASE": "Relative change is hidden because the starting number is very small. When the baseline is tiny, lift can look huge and mislead. The gap out of 100 people is the clearest way to read this.",
-    "FLAT_RESULT": "The exposed and control groups answered in very similar ways. This suggests the ads did not meaningfully change this metric in this period.",
-    "NEGATIVE_RESULT": "Fewer people who saw the ads answered positively than those who didn’t. This can happen for many reasons and is a useful learning signal rather than a failure.",
+# =========================
+# Notes dictionary (keys only here; copy lives in UI layer too)
+# =========================
+NOTE_KEYS = {
+    "LOW_RELIABILITY",
+    "DIRECTIONAL_SIGNAL",
+    "UNCLEAR_SIGNAL",
+    "LIFT_HIDDEN_SMALL_BASE",
+    "FLAT_RESULT",
+    "NEGATIVE_RESULT",
+    "AGGREGATED_RESULT",
+    "MIXED_PERFORMANCE",
+    "DATA_MISSING",
+    "FILTER_IMPACT",
 }
 
 
-# =============================
-# Main function
-# =============================
 def compute_all_metrics(
     df: pd.DataFrame,
-    # Movable bands (defaults)
+    *,
+    # Reliability bands (movable)
     GREAT_THRESHOLD: int = 300,
     GOOD_THRESHOLD: int = 100,
     DIRECTIONAL_THRESHOLD: int = 50,
@@ -57,13 +55,17 @@ def compute_all_metrics(
     CLEAR_P_THRESHOLD: float = 0.05,
     DIRECTIONAL_P_THRESHOLD: float = 0.10,
     # Lift visibility rules
-    MIN_BASELINE_PERCENT: float = 5.0,
-    MIN_LIFT_SAMPLE: int = 50,
-    # Flat threshold for notes
+    MIN_BASELINE_PERCENT: float = 5.0,  # control % < 5 => hide lift
+    MIN_LIFT_SAMPLE: int = 50,          # control_n < 50 => hide lift
+    # Flat result rule (gap smaller than this)
     FLAT_THRESHOLD_PP: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Computes BLS stats from inputs only.
+    Computes BLS stats from inputs only, plus:
+      - Reliability_N, Reliability_Band (Great/Good/Directional/Low)
+      - Clarity_Band (Clear/Directional/Unclear)
+      - Lift_Shown boolean
+      - Notes_Keys (pipe-separated), Notes_Count
 
     Required input columns:
       - Control Sample
@@ -73,7 +75,6 @@ def compute_all_metrics(
 
     Scores can be 0–100 (percent) or 0–1 (proportion).
     """
-
     d = df.copy()
 
     required = ["Control Sample", "Exposed Sample", "Control Score", "Exposed Score"]
@@ -81,14 +82,13 @@ def compute_all_metrics(
     if missing:
         raise ValueError(f"Missing required input columns: {missing}")
 
-    # Inputs
     n1 = d["Control Sample"].apply(_to_float).astype(float)
     n2 = d["Exposed Sample"].apply(_to_float).astype(float)
 
     s1 = d["Control Score"].apply(_to_float).astype(float)
     s2 = d["Exposed Score"].apply(_to_float).astype(float)
 
-    # Decide if scores are % or proportions
+    # detect whether scores are 0-100 vs 0-1
     med = pd.concat([s1, s2], axis=0).median(skipna=True)
     scores_are_percent = (med is not None) and (med == med) and (med > 1.5)
 
@@ -99,11 +99,9 @@ def compute_all_metrics(
         p1 = s1.apply(_clamp01)
         p2 = s2.apply(_clamp01)
 
-    # Core deltas
-    diff = (p2 - p1)                              # proportion difference
-    lift = diff / p1.replace(0.0, float("nan"))   # relative difference
+    diff = (p2 - p1)  # proportion points (0-1)
+    lift = diff / p1.replace(0.0, float("nan"))
 
-    # Two-proportion z-test (pooled SE)
     pooled = ((p1 * n1) + (p2 * n2)) / (n1 + n2)
 
     se = (pooled * (1 - pooled) * (1 / n1 + 1 / n2))
@@ -112,14 +110,13 @@ def compute_all_metrics(
     z = diff / se.replace(0.0, float("nan"))
     pval = z.apply(lambda zz: _two_sided_p_value(zz) if (zz == zz) else float("nan"))
 
-    # 95% CI for diff
     zcrit = 1.96
     ci_low = diff - zcrit * se
     ci_high = diff + zcrit * se
 
     sig95 = pval.apply(lambda pv: bool(pv <= CLEAR_P_THRESHOLD) if (pv == pv) else False)
 
-    # Effect size (Cohen's h)
+    # effect size (Cohen's h)
     def cohens_h(a, b):
         try:
             return 2.0 * math.asin(math.sqrt(_clamp01(b))) - 2.0 * math.asin(math.sqrt(_clamp01(a)))
@@ -141,13 +138,17 @@ def compute_all_metrics(
 
     hq = [h_qual(x) for x in h]
 
-    # =============================
-    # Reliability + clarity (new model)
-    # =============================
+    # -------------------------
+    # Reliability + Clarity bands (A)
+    # -------------------------
     reliability_n = pd.concat([n1, n2], axis=1).min(axis=1)
 
     def reliability_band(mn):
-        if _is_nan(mn):
+        try:
+            mn = float(mn)
+        except Exception:
+            return "Low"
+        if mn != mn:
             return "Low"
         if mn >= GREAT_THRESHOLD:
             return "Great"
@@ -160,78 +161,94 @@ def compute_all_metrics(
     rel_band = reliability_n.apply(reliability_band)
 
     def clarity_band(pv, mn):
-        if _is_nan(pv):
+        try:
+            pv = float(pv)
+            mn = float(mn)
+        except Exception:
             return "Unclear"
-        # "Clear" requires both strong p-value and at least Good sample size
-        if pv <= CLEAR_P_THRESHOLD and (not _is_nan(mn)) and mn >= GOOD_THRESHOLD:
+        if pv != pv:
+            return "Unclear"
+        # Gate Clear by "Good" minimum sample
+        if pv <= CLEAR_P_THRESHOLD and (mn == mn and mn >= GOOD_THRESHOLD):
             return "Clear"
         if pv <= DIRECTIONAL_P_THRESHOLD:
             return "Directional"
         return "Unclear"
 
-    cla_band = [clarity_band(pv, mn) for pv, mn in zip(pval.tolist(), reliability_n.tolist())]
+    clarity = [clarity_band(pv, mn) for pv, mn in zip(pval.tolist(), reliability_n.tolist())]
 
-    # =============================
-    # Lift visibility + notes (explainers)
-    # =============================
+    # -------------------------
+    # Lift visibility rule (A)
+    # -------------------------
     control_pct = (p1 * 100.0)
     exposed_pct = (p2 * 100.0)
     diff_pp = (diff * 100.0)
     lift_pct = (lift * 100.0)
 
-    lift_shown = []
-    notes_short = []
+    def lift_shown_row(cpct, cn):
+        try:
+            cpct = float(cpct)
+            cn = float(cn)
+        except Exception:
+            return False
+        if cpct != cpct or cn != cn:
+            return False
+        if cpct < MIN_BASELINE_PERCENT:
+            return False
+        if cn < MIN_LIFT_SAMPLE:
+            return False
+        return True
 
-    for cp, mn, pv, gap, rb, cb in zip(
-        control_pct.tolist(),
-        reliability_n.tolist(),
-        pval.tolist(),
-        diff_pp.tolist(),
-        rel_band.tolist(),
-        cla_band,
-    ):
+    lift_shown = [lift_shown_row(cp, cn) for cp, cn in zip(control_pct.tolist(), n1.tolist())]
+
+    # -------------------------
+    # Notes engine (keys)
+    # -------------------------
+    def notes_for_row(gap_pp_val, rb, cb, lift_ok):
         notes = []
-
-        # Lift visibility
-        show_lift = True
-        if (not _is_nan(cp) and cp < MIN_BASELINE_PERCENT) or (not _is_nan(mn) and mn < MIN_LIFT_SAMPLE):
-            show_lift = False
-            notes.append("LIFT_HIDDEN_SMALL_BASE")
-
-        # Reliability / clarity notes
+        # reliability
         if rb == "Low":
             notes.append("LOW_RELIABILITY")
-        if cb == "Directional":
-            notes.append("DIRECTIONAL_SIGNAL")
+        # clarity
         if cb == "Unclear":
             notes.append("UNCLEAR_SIGNAL")
+        elif cb == "Directional":
+            notes.append("DIRECTIONAL_SIGNAL")
+        # lift hidden
+        if not lift_ok:
+            notes.append("LIFT_HIDDEN_SMALL_BASE")
+        # direction / flatness
+        try:
+            g = float(gap_pp_val)
+            if g == g:
+                if abs(g) < float(FLAT_THRESHOLD_PP):
+                    notes.append("FLAT_RESULT")
+                elif g < 0:
+                    notes.append("NEGATIVE_RESULT")
+        except Exception:
+            pass
 
-        # Flat / negative notes
-        if not _is_nan(gap):
-            if abs(gap) < FLAT_THRESHOLD_PP:
-                notes.append("FLAT_RESULT")
-            if gap < 0:
-                notes.append("NEGATIVE_RESULT")
-
-        # Deduplicate while keeping order
+        # de-dup preserve order
         seen = set()
-        notes = [x for x in notes if not (x in seen or seen.add(x))]
+        out = []
+        for k in notes:
+            if k in NOTE_KEYS and k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
 
-        lift_shown.append(bool(show_lift))
+    notes_list = [
+        notes_for_row(g, rb, cb, lk)
+        for g, rb, cb, lk in zip(diff_pp.tolist(), rel_band.tolist(), clarity, lift_shown)
+    ]
+    notes_keys = ["|".join(x) if x else "" for x in notes_list]
+    notes_count = [len(x) for x in notes_list]
 
-        if len(notes) == 0:
-            notes_short.append("")
-        else:
-            # Keep it short: join up to 2 notes
-            msg = " ".join([NOTES[k] for k in notes[:2] if k in NOTES])
-            notes_short.append(msg)
-
-    # =============================
-    # Write outputs (keeps your old columns too)
-    # =============================
+    # -------------------------
+    # Write columns
+    # -------------------------
     d["Control_Pct"] = control_pct
     d["Exposed_Pct"] = exposed_pct
-
     d["Diff_PctPts"] = diff_pp
     d["Lift_Pct"] = lift_pct
 
@@ -247,11 +264,14 @@ def compute_all_metrics(
     d["Effect_Size_h"] = h
     d["Effect_Size_Qual"] = hq
 
-    # New fields (used by charts + UI + PDF if you want)
+    # A-system fields
     d["Reliability_N"] = reliability_n
     d["Reliability_Band"] = rel_band
-    d["Clarity_Band"] = cla_band
+    d["Clarity_Band"] = clarity
     d["Lift_Shown"] = lift_shown
-    d["Notes_Short"] = notes_short
+
+    # Notes (keys)
+    d["Notes_Keys"] = notes_keys
+    d["Notes_Count"] = notes_count
 
     return d
